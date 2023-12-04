@@ -21,3 +21,4 @@
 go.work
 
 # Environment files that may contain sensitive data
+db.env
