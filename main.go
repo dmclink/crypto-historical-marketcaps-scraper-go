@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
@@ -16,24 +17,18 @@ import (
 )
 
 type Row struct {
-	Date          time.Time
-	UnixTime      int64
-	Rank          int64
-	Name          string
-	Symbol        string
-	MarketCap     float64
-	McapNotNull   bool
-	Price         float64
-	Supply        int64
-	SupplyNotNull bool
-	Volume        float64
-	VolumeNotNull bool
-	HourChange    float64
-	HourNotNull   bool
-	DayChange     float64
-	DayNotNull    bool
-	WeekChange    float64
-	WeekNotNull   bool
+	Date       time.Time
+	UnixTime   int64
+	Rank       int64
+	Name       string
+	Symbol     string
+	MarketCap  sql.NullFloat64
+	Price      sql.NullFloat64
+	Supply     sql.NullInt64
+	Volume     sql.NullFloat64
+	HourChange sql.NullFloat64
+	DayChange  sql.NullFloat64
+	WeekChange sql.NullFloat64
 }
 
 const scrollDelay = 500 * time.Millisecond
@@ -58,26 +53,44 @@ func main() {
 		log.Println("DB connected successfully")
 	}
 	defer dbpool.Close()
-	_, err = dbpool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS `+tableName+` (
-			snapshot_date DATE,
-			unix_time BIGINT,
-			rank INTEGER,
-			name VARCHAR(255),
-			symbol VARCHAR(15),
-			market_cap DECIMAL,
-			price DECIMAL,
-			circulating_supply BIGINT,
-			volume_24h DECIMAL
-			percent_change_1h DECIMAL(7, 2),
-			percent_change_24h DECIMAL(7, 2),
-			percent_change_7d DECIMAL(7, 2),
 
-			PRIMARY KEY (snapshot_date, rank)
-		);
-	`)
+	// Try to select the latest date on table. If table doesn't exist, create
+	// table and initialize starting date to April 28th, 2013 (the first snapshot
+	// on coinmarketcap)
+	queryLastDate := dbpool.QueryRow(ctx, `SELECT snapshot_date FROM `+tableName+` ORDER BY snapshot_date DESC LIMIT 1`)
+	var date time.Time
+	err = queryLastDate.Scan(&date)
 	if err != nil {
-		log.Fatal("Error creating table |", err)
+		if strings.Contains(err.Error(), "does not exist") {
+			date = time.Date(2013, 4, 28, 0, 0, 0, 0, time.UTC)
+			log.Println("Table does not exist. Creating new table.")
+			_, err = dbpool.Exec(ctx, `
+				CREATE TABLE IF NOT EXISTS `+tableName+` (
+					snapshot_date DATE,
+					unix_time BIGINT,
+					rank INTEGER,
+					name VARCHAR(255),
+					symbol VARCHAR(15),
+					market_cap DECIMAL,
+					price DECIMAL,
+					circulating_supply BIGINT,
+					volume_24h DECIMAL,
+					percent_change_1h DECIMAL(7, 2),
+					percent_change_24h DECIMAL(7, 2),
+					percent_change_7d DECIMAL(7, 2),
+				
+					PRIMARY KEY (snapshot_date, rank)
+				);
+			`)
+			if err != nil {
+				log.Fatal("Error creating table |", err)
+			}
+		} else {
+			log.Fatal("Error querying table |", err)
+		}
+	} else {
+		log.Println("Most recent date is", date)
+		date = date.AddDate(0, 0, 7)
 	}
 
 	opts := []selenium.ServiceOption{}
@@ -95,8 +108,7 @@ func main() {
 	}
 	defer wd.Quit()
 	log.Println("ChromeDriver server started successfully")
-	// initialize starting date. April 28th, 2013 is the first snapshot entry on coinmarketcap
-	date := time.Date(2016, 2, 28, 0, 0, 0, 0, time.UTC)
+
 	for date.Before(time.Now()) {
 		log.Println("Beginning parse for snapshot | ", date)
 		url := fmt.Sprintf("https://coinmarketcap.com/historical/%d%02d%02d/", date.Year(), date.Month(), date.Day())
@@ -125,7 +137,7 @@ func main() {
 		// Find the "Reject All" button and click it
 		rejectButton, err := wd.FindElement(selenium.ByCSSSelector, "#onetrust-reject-all-handler")
 		if err != nil {
-			log.Println("Failed to find reject button |", err)
+			log.Println("\"Reject All\" button not found |")
 		} else {
 			err = rejectButton.Click()
 			if err != nil {
@@ -190,6 +202,13 @@ func main() {
 		if err != nil {
 			log.Println("Failed to find thead | ", err)
 		}
+		if len(theads) == 0 {
+			// page likely didn't load due to rate limiting, try again in 5 minutes
+			wd.DeleteAllCookies()
+			log.Println("Error finding theads, restarting loop in 5 minutes")
+			time.Sleep(300 * time.Second)
+			continue
+		}
 		thead := theads[2]
 		columns, err := thead.FindElements(selenium.ByCSSSelector, "th")
 		if err != nil {
@@ -202,7 +221,9 @@ func main() {
 			}
 			colIndexes[columnText] = i
 		}
-		log.Println(colIndexes)
+		if _, ok := colIndexes["Rank"]; !ok {
+			log.Fatal("Error loading colIndexes \"Rank\" not found | ", colIndexes)
+		}
 
 		var queuedRows []Row
 
@@ -226,6 +247,7 @@ func main() {
 			var marketCap float64
 			var mcapNotNull bool
 			var price float64
+			var priceNotNull bool
 			var supply int64
 			var supplyNotNull bool
 			var volume float64
@@ -241,6 +263,10 @@ func main() {
 			if rankTxt, err := cells[colIndexes["Rank"]].Text(); err != nil {
 				log.Fatal("Error converting cell to text | ", err)
 			} else {
+				if rankTxt == "" {
+					log.Printf("Error loading \"Rank\" column for row %v, restarting loop for this snapshot date %v", row, date)
+					continue
+				}
 				if rank, err = strconv.ParseInt(rankTxt, 10, 64); err != nil {
 					log.Fatal("Error converting string to int | ", err)
 				}
@@ -271,8 +297,15 @@ func main() {
 			} else {
 				priceTxt = strings.Replace(priceTxt, "$", "", -1)
 				priceTxt = strings.Replace(priceTxt, ",", "", -1)
-				if price, err = strconv.ParseFloat(priceTxt, 64); err != nil {
-					log.Fatal("ParseFloat error, price | ", err)
+				if priceTxt == "" || priceTxt == "--" {
+					price = 0.0
+					priceNotNull = false
+				} else {
+
+					if price, err = strconv.ParseFloat(priceTxt, 64); err != nil {
+						log.Fatal("ParseFloat error, price | ", err)
+					}
+					priceNotNull = true
 				}
 			}
 			if supplyTxt, err := cells[colIndexes["Circulating Supply"]].Text(); err != nil {
@@ -291,14 +324,19 @@ func main() {
 				}
 			}
 			if volIndex, ok := colIndexes["volume (24h)"]; ok {
-				volumeNotNull = true
 				if volumeTxt, err := cells[volIndex].Text(); err != nil {
 					log.Fatal("Error converting volume cell to text | ", err)
 				} else {
 					volumeTxt = strings.Replace(volumeTxt, "$", "", -1)
 					volumeTxt = strings.Replace(volumeTxt, ",", "", -1)
-					if volume, err = strconv.ParseFloat(volumeTxt, 64); err != nil {
-						log.Fatal("ParseFloat error, volume | ", err)
+					if volumeTxt == "--" || volumeTxt == "" {
+						volumeNotNull = false
+						volume = 0
+					} else {
+						volumeNotNull = true
+						if volume, err = strconv.ParseFloat(volumeTxt, 64); err != nil {
+							log.Fatal("ParseFloat error, volume | ", err)
+						}
 					}
 				}
 			} else {
@@ -311,24 +349,39 @@ func main() {
 			// #endregion
 
 			newRow := Row{
-				Date:          date,
-				UnixTime:      date.Unix(),
-				Rank:          rank,
-				Name:          name,
-				Symbol:        symbol,
-				MarketCap:     marketCap,
-				McapNotNull:   mcapNotNull,
-				Price:         price,
-				Supply:        supply,
-				SupplyNotNull: supplyNotNull,
-				Volume:        volume,
-				VolumeNotNull: volumeNotNull,
-				HourChange:    hourChange,
-				HourNotNull:   hourNotNull,
-				DayChange:     dayChange,
-				DayNotNull:    dayNotNull,
-				WeekChange:    weekChange,
-				WeekNotNull:   weekNotNull,
+				Date:     date,
+				UnixTime: date.Unix(),
+				Rank:     rank,
+				Name:     name,
+				Symbol:   symbol,
+				MarketCap: sql.NullFloat64{
+					Float64: marketCap,
+					Valid:   mcapNotNull,
+				},
+				Price: sql.NullFloat64{
+					Float64: price,
+					Valid:   priceNotNull,
+				},
+				Supply: sql.NullInt64{
+					Int64: supply,
+					Valid: supplyNotNull,
+				},
+				Volume: sql.NullFloat64{
+					Float64: volume,
+					Valid:   volumeNotNull,
+				},
+				HourChange: sql.NullFloat64{
+					Float64: hourChange,
+					Valid:   hourNotNull,
+				},
+				DayChange: sql.NullFloat64{
+					Float64: dayChange,
+					Valid:   dayNotNull,
+				},
+				WeekChange: sql.NullFloat64{
+					Float64: weekChange,
+					Valid:   weekNotNull,
+				},
 			}
 			queuedRows = append(queuedRows, newRow)
 		}
@@ -337,9 +390,10 @@ func main() {
 
 		// add 7 days to next entry
 		date = date.AddDate(0, 0, 7)
-
-		fmt.Println("Press 'Enter' to continue...")
-		fmt.Scanln()
+		if date.After(time.Now()) {
+			log.Println("Program complete")
+			break
+		}
 	}
 }
 
@@ -374,6 +428,7 @@ func percTxtToFloat64(text string, err error) (float64, bool) {
 		return 0.0, false
 	} else {
 		text = strings.Replace(text, "%", "", -1)
+		text = strings.Replace(text, ",", "", -1)
 		text = strings.Replace(text, "<", "", -1)
 		text = strings.Replace(text, ">", "", -1)
 		text = strings.Replace(text, " ", "", -1)
