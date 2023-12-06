@@ -107,9 +107,20 @@ func main() {
 
 	// #region Connect to the WebDriver instance running locally
 	opts := []selenium.ServiceOption{}
-	service, err := selenium.NewChromeDriverService("./chromedriver.exe", 4444, opts...)
+	chromeDriverPath := "./chromedriver.exe"
+	service, err := selenium.NewChromeDriverService(chromeDriverPath, 4444, opts...)
 	if err != nil {
-		log.Fatal("Error starting the ChromeDriver server:", err)
+		if strings.Contains(err.Error(), "file does not exist") {
+			log.Println("Error finding chromedriver.exe | ", err)
+			fmt.Println("Enter chromedriver.exe absolute path:")
+			fmt.Scanln(&chromeDriverPath)
+			service, err = selenium.NewChromeDriverService(chromeDriverPath, 4444, opts...)
+			if err != nil {
+				log.Fatal("Error finding chromedriver.exe. Check file path and restart program | ", err)
+			}
+		} else {
+			log.Fatal("Error starting ChromeDriver service | ", err)
+		}
 	}
 	defer service.Stop()
 
