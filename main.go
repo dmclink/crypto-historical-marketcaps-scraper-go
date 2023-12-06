@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -36,13 +38,21 @@ const loadMoreDelay = 2 * time.Second
 const tableName = "marketcap_snapshots"
 
 func main() {
-	// Load db.env environment variables
+	// #region Load db.env environment variables
 	err := godotenv.Load("db.env")
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
 
-	// Connect to database and create table if it doesn't exist
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		fmt.Println("Error getting filepath")
+		return
+	}
+	dirPath := filepath.Dir(filename)
+	// #endregion
+
+	// #region Connect to database
 	ctx := context.Background()
 	connStr := "postgres://" + os.Getenv("DB_USER") + ":" + os.Getenv("DB_PASS") + "@" + os.Getenv("DB_HOST") + ":" + os.Getenv("DB_PORT") + "/" + os.Getenv("DB_NAME")
 	dbpool, err := pgxpool.New(ctx, connStr)
@@ -53,10 +63,11 @@ func main() {
 		log.Println("DB connected successfully")
 	}
 	defer dbpool.Close()
+	// #endregion
 
-	// Try to select the latest date on table. If table doesn't exist, create
-	// table and initialize starting date to April 28th, 2013 (the first snapshot
-	// on coinmarketcap)
+	// #region Try to select the latest date on table. If table doesn't ...
+	// exist, create table and initialize starting date to April 28th, 2013
+	// (the first snapshot on coinmarketcap)
 	queryLastDate := dbpool.QueryRow(ctx, `SELECT snapshot_date FROM `+tableName+` ORDER BY snapshot_date DESC LIMIT 1`)
 	var date time.Time
 	err = queryLastDate.Scan(&date)
@@ -92,7 +103,9 @@ func main() {
 		log.Println("Most recent date is", date)
 		date = date.AddDate(0, 0, 7)
 	}
+	// #endregion
 
+	// #region Connect to the WebDriver instance running locally
 	opts := []selenium.ServiceOption{}
 	service, err := selenium.NewChromeDriverService("./chromedriver.exe", 4444, opts...)
 	if err != nil {
@@ -100,7 +113,6 @@ func main() {
 	}
 	defer service.Stop()
 
-	// Connect to the WebDriver instance running locally
 	caps := selenium.Capabilities{"browserName": "chrome"}
 	wd, err := selenium.NewRemote(caps, fmt.Sprintf("http://localhost:%d/wd/hub", 4444))
 	if err != nil {
@@ -108,12 +120,15 @@ func main() {
 	}
 	defer wd.Quit()
 	log.Println("ChromeDriver server started successfully")
+	// #endregion
 
+	// Begin program loop to iterate over every snapshot
 	for date.Before(time.Now()) {
 		log.Println("Beginning parse for snapshot | ", date)
 		url := fmt.Sprintf("https://coinmarketcap.com/historical/%d%02d%02d/", date.Year(), date.Month(), date.Day())
 		log.Println(url)
 
+		// #region Navigate to page and fully load by clicking buttons
 		// Navigate to the webpage
 		err = wd.Get(url)
 		if err != nil {
@@ -162,6 +177,7 @@ func main() {
 				time.Sleep(loadMoreDelay)
 			}
 		}
+		// #endregion
 
 		// #region Scroll to the top of the page and then start scrolling down one frame
 		// at a time until it reaches the bottom
@@ -196,6 +212,7 @@ func main() {
 		log.Println("End of page reached")
 		// #endregion
 
+		// #region Iterate theads and rows
 		// Iterate over thead to find column indexes
 		colIndexes := make(map[string]int)
 		theads, err := wd.FindElements(selenium.ByCSSSelector, "thead")
@@ -241,6 +258,9 @@ func main() {
 			if err != nil {
 				log.Println("Error finding cell elements | ", err)
 			}
+			// #endregion
+
+			// #region Clean page text and convert to data types for Row struct
 			var rank int64
 			var name string
 			var symbol string
@@ -259,7 +279,6 @@ func main() {
 			var weekChange float64
 			var weekNotNull bool
 
-			// #region Clean page text and convert to data types for Row struct
 			if rankTxt, err := cells[colIndexes["Rank"]].Text(); err != nil {
 				log.Fatal("Error converting cell to text | ", err)
 			} else {
@@ -346,7 +365,6 @@ func main() {
 			hourChange, hourNotNull = percTxtToFloat64(cells[7].Text())
 			dayChange, dayNotNull = percTxtToFloat64(cells[8].Text())
 			weekChange, weekNotNull = percTxtToFloat64(cells[9].Text())
-			// #endregion
 
 			newRow := Row{
 				Date:     date,
@@ -383,6 +401,8 @@ func main() {
 					Valid:   weekNotNull,
 				},
 			}
+
+			// #endregion
 			queuedRows = append(queuedRows, newRow)
 		}
 
@@ -390,10 +410,25 @@ func main() {
 
 		// add 7 days to next entry
 		date = date.AddDate(0, 0, 7)
-		if date.After(time.Now()) {
-			log.Println("Program complete")
-			break
+	}
+	// #region Export to CSV after program finished
+	log.Println("Program complete")
+	log.Println("Would you like to export database to csv? (PSQL Role must be Superuser or a member of the pg_write_server_files role)")
+	log.Println("Enter y or yes. Enter anything else to quit")
+	var userResp string
+	_, err = fmt.Scan(&userResp)
+	if err != nil {
+		log.Fatal("Error scanning input | ", err)
+	}
+	userResp = strings.ToLower(userResp)
+	if userResp == "y" || userResp == "yes" {
+		copyQueryString := `COPY marketcap_snapshots TO '` + dirPath + `\` + tableName + `_` + time.Now().Format("2006-01-02") + `' DELIMITER ',' CSV HEADER;`
+		_, err = dbpool.Exec(ctx, copyQueryString)
+		if err != nil {
+			log.Fatal("Error exporting to .csv | ", err)
 		}
+		// #endregion
+
 	}
 }
 
