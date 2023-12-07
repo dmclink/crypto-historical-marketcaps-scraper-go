@@ -161,29 +161,39 @@ func main() {
 		log.Println("Page loaded")
 
 		// Find the "Reject All" button and click it
-		rejectButton, err := wd.FindElement(selenium.ByCSSSelector, "#onetrust-reject-all-handler")
-		if err != nil {
-			log.Println("\"Reject All\" button not found |")
-		} else {
-			err = rejectButton.Click()
-			if err != nil {
-				log.Println("Failed to click reject button | ", err)
-			} else {
-				log.Println("\"Reject All\" button clicked")
-			}
-		}
+		clickRejectAll(wd)
+		countLoadMoreClicked := 0
 		for {
 			// Find the "Load More" button and click it
 			button, err := wd.FindElement(selenium.ByCSSSelector, "div.cmc-table-listing__loadmore > button[type='button']")
 			if err != nil {
-				log.Println("\"Load More\" button not found")
-				break
+				if strings.Contains(err.Error(), "no such element") {
+					log.Println("\"Load More\" button not found")
+					break
+				} else {
+					log.Fatal("Error finding \"Load More\" button | ", err)
+				}
 			} else {
 				err = button.Click()
 				if err != nil {
-					fmt.Println("Failed to click button:", err)
+					if strings.Contains(err.Error(), "click intercepted") {
+						clickRejectAll(wd)
+					} else {
+						log.Fatal("Error clicking \"Load More\" button | ", err)
+					}
 				} else {
 					log.Println("\"Load More\" button clicked")
+				}
+				countLoadMoreClicked += 1
+				// Weird edge case for date = 2016-07-03 where Load More button
+				// can be clicked infinitely. Suspect it is because there are
+				// exactly 600 cryptos and page stops at 600. Server side has
+				// off-by-one error?
+				//
+				// NOTE: Hard coded break after 100 clicks won't be future proof
+				// if CMC adds more than 20,000 cryptos
+				if countLoadMoreClicked > 100 {
+					break
 				}
 				time.Sleep(loadMoreDelay)
 			}
@@ -440,6 +450,20 @@ func main() {
 		}
 		// #endregion
 
+	}
+}
+
+func clickRejectAll(wd selenium.WebDriver) {
+	rejectButton, err := wd.FindElement(selenium.ByCSSSelector, "#onetrust-reject-all-handler")
+	if err != nil {
+		log.Println("\"Reject All\" button not found |")
+	} else {
+		err = rejectButton.Click()
+		if err != nil {
+			log.Println("Failed to click reject button | ", err)
+		} else {
+			log.Println("\"Reject All\" button clicked")
+		}
 	}
 }
 
