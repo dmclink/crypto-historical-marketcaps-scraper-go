@@ -46,7 +46,7 @@ const loadMoreDelay = 2 * time.Second
 // Name of table in your database. Will be created if it doesn't exist
 const tableName = "marketcap_snapshots"
 
-var numCPU = 4
+var numCPU = runtime.NumCPU()
 
 func main() {
 	var err error
