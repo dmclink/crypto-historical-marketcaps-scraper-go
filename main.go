@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -45,9 +46,15 @@ const loadMoreDelay = 2 * time.Second
 // Name of table in your database. Will be created if it doesn't exist
 const tableName = "marketcap_snapshots"
 
+var numCPU = 4
+
 func main() {
+	var err error
+	// log.Println("Number of CPUs | ", numCPU)
+	// log.Println("Number of GOMAXPROCS | ", runtime.GOMAXPROCS(0))
+
 	// #region Load db.env environment variables
-	err := godotenv.Load("db.env")
+	err = godotenv.Load("db.env")
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
@@ -272,6 +279,7 @@ func main() {
 			log.Fatal("Error loading colIndexes \"Rank\" not found | ", colIndexes)
 		}
 
+		// slice of Row structs to be batch inserted to database
 		var queuedRows []Row
 
 		// Find and iterate over table rows, append them to queuedRows
@@ -283,191 +291,54 @@ func main() {
 		if err != nil {
 			log.Println("Error finding row elements | ", err)
 		}
-		for _, row := range rows {
-			cells, err := row.FindElements(selenium.ByCSSSelector, "td")
-			if err != nil {
-				log.Println("Error finding cell elements | ", err)
-			}
-			// #endregion
+		// Create channels for tasks and results
+		taskQueue := make(chan []selenium.WebElement)
+		resultsQueue := make(chan Row)
 
-			// #region Clean page text and convert to data types for Row struct
-			var rank int64
-			var name string
-			var symbol string
-			var marketCap float64
-			var mcapNotNull bool
-			var price float64
-			var priceNotNull bool
-			var supply int64
-			var supplyNotNull bool
-			var volume float64
-			var volumeNotNull bool
-			var hourChange float64
-			var hourNotNull bool
-			var dayChange float64
-			var dayNotNull bool
-			var weekChange float64
-			var weekNotNull bool
+		// Start worker goroutines
+		var wg sync.WaitGroup
+		for i := 0; i < numCPU; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for cells := range taskQueue {
+					row, err := processRow(cells, colIndexes, date)
+					if err != nil {
+						log.Fatal("Error processing row, restarting loop for this snapshot date | ", err)
+						// TO DO:
+						// implement control channel on main to restart loop instead of exiting with log.Fatal
+						continue
+					}
+					resultsQueue <- row
+				}
+			}()
+		}
 
-			var b strings.Builder
-			if rankTxt, err := cells[colIndexes["Rank"]].Text(); err != nil {
-				log.Fatal("Error converting cell to text | ", err)
-			} else {
-				if rankTxt == "" {
-					log.Printf("Error loading \"Rank\" column for row %v, restarting loop for this snapshot date %v", row, date)
+		// Start a goroutine to close the results channel after
+		// all worker goroutines are done
+		go func() {
+			wg.Wait()
+			close(resultsQueue)
+		}()
+
+		// Distribute rows to the worker goroutines for processing
+		go func() {
+			for _, row := range rows {
+				cells, err := row.FindElements(selenium.ByCSSSelector, "td")
+				if err != nil {
+					log.Println("Error finding cell elements | ", err)
 					continue
 				}
-				if rank, err = strconv.ParseInt(rankTxt, 10, 64); err != nil {
-					log.Fatal("Error converting string to int | ", err)
-				}
+				taskQueue <- cells
 			}
-			if name, err = cells[colIndexes["Name"]].Text(); err != nil {
-				log.Fatal("Error converting name cell to text | ", err)
-			}
-			if symbol, err = cells[colIndexes["Symbol"]].Text(); err != nil {
-				log.Fatal("Error converting symbol cell to text | ", err)
-			}
-			if marketCapTxt, err := cells[colIndexes["Market Cap"]].Text(); err != nil {
-				log.Fatal("Error converting marketCap cell to text | ", err)
-			} else {
-				if marketCapTxt == "--" || marketCapTxt == "" {
-					marketCap = 0.0
-					mcapNotNull = false
-				} else {
-					mcapNotNull = true
-					for _, ch := range marketCapTxt {
-						switch ch {
-						case '$', ',':
-							continue
-						default:
-							b.WriteRune(ch)
-						}
-					}
-					marketCapTxt = b.String()
-					if marketCap, err = strconv.ParseFloat(marketCapTxt, 64); err != nil {
-						log.Fatal("ParseFloat error, marketCap | ", err)
-					}
-				}
-			}
-			if priceTxt, err := cells[colIndexes["Price"]].Text(); err != nil {
-				log.Fatal("Error converting price cell to text | ", err)
-			} else {
-				b.Reset()
-				for _, ch := range priceTxt {
-					switch ch {
-					case '$', ',':
-						continue
-					default:
-						b.WriteRune(ch)
-					}
-				}
-				priceTxt = b.String()
-				if priceTxt == "" || priceTxt == "--" {
-					price = 0.0
-					priceNotNull = false
-				} else {
+			close(taskQueue)
+		}()
 
-					if price, err = strconv.ParseFloat(priceTxt, 64); err != nil {
-						log.Fatal("ParseFloat error, price | ", err)
-					}
-					priceNotNull = true
-				}
-			}
-			if supplyTxt, err := cells[colIndexes["Circulating Supply"]].Text(); err != nil {
-				log.Fatal("Error converting supply cell to text | ", err)
-			} else {
-				supplyTxt, _, _ = strings.Cut(supplyTxt, " ")
-				if supplyTxt == "" || supplyTxt == "?" {
-					supplyNotNull = false
-					supply = 0
-				} else {
-					supplyNotNull = true
-					b.Reset()
-					for _, ch := range supplyTxt {
-						switch ch {
-						case ',', ' ':
-							continue
-						default:
-							b.WriteRune(ch)
-						}
-					}
-					supplyTxt = b.String()
-					if supply, err = strconv.ParseInt(supplyTxt, 10, 64); err != nil {
-						log.Fatal("ParseInt error, supply | ", err)
-					}
-				}
-			}
-			if volIndex, ok := colIndexes["volume (24h)"]; ok {
-				if volumeTxt, err := cells[volIndex].Text(); err != nil {
-					log.Fatal("Error converting volume cell to text | ", err)
-				} else {
-					b.Reset()
-					for _, ch := range volumeTxt {
-						switch ch {
-						case '$', ',':
-							continue
-						default:
-							b.WriteRune(ch)
-						}
-					}
-					volumeTxt = b.String()
-					if volumeTxt == "--" || volumeTxt == "" {
-						volumeNotNull = false
-						volume = 0
-					} else {
-						volumeNotNull = true
-						if volume, err = strconv.ParseFloat(volumeTxt, 64); err != nil {
-							log.Fatal("ParseFloat error, volume | ", err)
-						}
-					}
-				}
-			} else {
-				volumeNotNull = false
-				volume = 0
-			}
-			hourChange, hourNotNull = percTxtToFloat64(cells[7].Text())
-			dayChange, dayNotNull = percTxtToFloat64(cells[8].Text())
-			weekChange, weekNotNull = percTxtToFloat64(cells[9].Text())
-
-			newRow := Row{
-				Date:     date,
-				UnixTime: date.Unix(),
-				Rank:     rank,
-				Name:     name,
-				Symbol:   symbol,
-				MarketCap: sql.NullFloat64{
-					Float64: marketCap,
-					Valid:   mcapNotNull,
-				},
-				Price: sql.NullFloat64{
-					Float64: price,
-					Valid:   priceNotNull,
-				},
-				Supply: sql.NullInt64{
-					Int64: supply,
-					Valid: supplyNotNull,
-				},
-				Volume: sql.NullFloat64{
-					Float64: volume,
-					Valid:   volumeNotNull,
-				},
-				HourChange: sql.NullFloat64{
-					Float64: hourChange,
-					Valid:   hourNotNull,
-				},
-				DayChange: sql.NullFloat64{
-					Float64: dayChange,
-					Valid:   dayNotNull,
-				},
-				WeekChange: sql.NullFloat64{
-					Float64: weekChange,
-					Valid:   weekNotNull,
-				},
-			}
-
-			// #endregion
-			queuedRows = append(queuedRows, newRow)
+		// Collect and print the results
+		for result := range resultsQueue {
+			queuedRows = append(queuedRows, result)
 		}
+
 		log.Println("Batch inserting rows")
 		batchInsertRows(queuedRows, ctx, dbpool)
 
@@ -493,6 +364,185 @@ func main() {
 		// #endregion
 
 	}
+}
+
+func processRow(cells []selenium.WebElement, colIndexes map[string]int, date time.Time) (Row, error) {
+	// #region Clean page text and convert to data types for Row struct
+	var err error
+	var rank int64
+	var name string
+	var symbol string
+	var marketCap float64
+	var mcapNotNull bool
+	var price float64
+	var priceNotNull bool
+	var supply int64
+	var supplyNotNull bool
+	var volume float64
+	var volumeNotNull bool
+	var hourChange float64
+	var hourNotNull bool
+	var dayChange float64
+	var dayNotNull bool
+	var weekChange float64
+	var weekNotNull bool
+
+	var b strings.Builder
+	if rankTxt, err := cells[colIndexes["Rank"]].Text(); err != nil {
+		log.Fatal("Error converting cell to text | ", err)
+	} else {
+		if rankTxt == "" {
+			log.Printf("Error loading \"Rank\" column for row %v, restarting loop for this snapshot date %v", cells, date)
+			return Row{}, err
+		}
+		if rank, err = strconv.ParseInt(rankTxt, 10, 64); err != nil {
+			log.Fatal("Error converting string to int | ", err)
+		}
+	}
+	if name, err = cells[colIndexes["Name"]].Text(); err != nil {
+		log.Fatal("Error converting name cell to text | ", err)
+	}
+	if symbol, err = cells[colIndexes["Symbol"]].Text(); err != nil {
+		log.Fatal("Error converting symbol cell to text | ", err)
+	}
+	if marketCapTxt, err := cells[colIndexes["Market Cap"]].Text(); err != nil {
+		log.Fatal("Error converting marketCap cell to text | ", err)
+	} else {
+		if marketCapTxt == "--" || marketCapTxt == "" {
+			marketCap = 0.0
+			mcapNotNull = false
+		} else {
+			mcapNotNull = true
+			for _, ch := range marketCapTxt {
+				switch ch {
+				case '$', ',':
+					continue
+				default:
+					b.WriteRune(ch)
+				}
+			}
+			marketCapTxt = b.String()
+			if marketCap, err = strconv.ParseFloat(marketCapTxt, 64); err != nil {
+				log.Fatal("ParseFloat error, marketCap | ", err)
+			}
+		}
+	}
+	if priceTxt, err := cells[colIndexes["Price"]].Text(); err != nil {
+		log.Fatal("Error converting price cell to text | ", err)
+	} else {
+		b.Reset()
+		for _, ch := range priceTxt {
+			switch ch {
+			case '$', ',':
+				continue
+			default:
+				b.WriteRune(ch)
+			}
+		}
+		priceTxt = b.String()
+		if priceTxt == "" || priceTxt == "--" {
+			price = 0.0
+			priceNotNull = false
+		} else {
+
+			if price, err = strconv.ParseFloat(priceTxt, 64); err != nil {
+				log.Fatal("ParseFloat error, price | ", err)
+			}
+			priceNotNull = true
+		}
+	}
+	if supplyTxt, err := cells[colIndexes["Circulating Supply"]].Text(); err != nil {
+		log.Fatal("Error converting supply cell to text | ", err)
+	} else {
+		supplyTxt, _, _ = strings.Cut(supplyTxt, " ")
+		if supplyTxt == "" || supplyTxt == "?" {
+			supplyNotNull = false
+			supply = 0
+		} else {
+			supplyNotNull = true
+			b.Reset()
+			for _, ch := range supplyTxt {
+				switch ch {
+				case ',', ' ':
+					continue
+				default:
+					b.WriteRune(ch)
+				}
+			}
+			supplyTxt = b.String()
+			if supply, err = strconv.ParseInt(supplyTxt, 10, 64); err != nil {
+				log.Fatal("ParseInt error, supply | ", err)
+			}
+		}
+	}
+	if volIndex, ok := colIndexes["volume (24h)"]; ok {
+		if volumeTxt, err := cells[volIndex].Text(); err != nil {
+			log.Fatal("Error converting volume cell to text | ", err)
+		} else {
+			b.Reset()
+			for _, ch := range volumeTxt {
+				switch ch {
+				case '$', ',':
+					continue
+				default:
+					b.WriteRune(ch)
+				}
+			}
+			volumeTxt = b.String()
+			if volumeTxt == "--" || volumeTxt == "" {
+				volumeNotNull = false
+				volume = 0
+			} else {
+				volumeNotNull = true
+				if volume, err = strconv.ParseFloat(volumeTxt, 64); err != nil {
+					log.Fatal("ParseFloat error, volume | ", err)
+				}
+			}
+		}
+	} else {
+		volumeNotNull = false
+		volume = 0
+	}
+	hourChange, hourNotNull = percTxtToFloat64(cells[7].Text())
+	dayChange, dayNotNull = percTxtToFloat64(cells[8].Text())
+	weekChange, weekNotNull = percTxtToFloat64(cells[9].Text())
+
+	newRow := Row{
+		Date:     date,
+		UnixTime: date.Unix(),
+		Rank:     rank,
+		Name:     name,
+		Symbol:   symbol,
+		MarketCap: sql.NullFloat64{
+			Float64: marketCap,
+			Valid:   mcapNotNull,
+		},
+		Price: sql.NullFloat64{
+			Float64: price,
+			Valid:   priceNotNull,
+		},
+		Supply: sql.NullInt64{
+			Int64: supply,
+			Valid: supplyNotNull,
+		},
+		Volume: sql.NullFloat64{
+			Float64: volume,
+			Valid:   volumeNotNull,
+		},
+		HourChange: sql.NullFloat64{
+			Float64: hourChange,
+			Valid:   hourNotNull,
+		},
+		DayChange: sql.NullFloat64{
+			Float64: dayChange,
+			Valid:   dayNotNull,
+		},
+		WeekChange: sql.NullFloat64{
+			Float64: weekChange,
+			Valid:   weekNotNull,
+		},
+	}
+	return newRow, nil
 }
 
 func clickRejectAll(wd selenium.WebDriver) {
