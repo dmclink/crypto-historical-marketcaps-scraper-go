@@ -17,3 +17,6 @@ ChromeDriver
 5. Install or copy chromedriver.exe to root folder of this project
     - (Alternative 1) Change variable chromeDriverPath to absolute path of chromedriver.exe
     - (Alternative 2) Enter absolute path of chromedriver.exe at the error prompt after running program
+6. Run
+    - (optional) Adjust constants as necessary. If program quits on "Error finding \"Rank" column" it is likely that scrollDelay is too low or viewportScrollMult is too high
+    - (optional) Rename constant tableName if desired. Program will check for/create a table with this name

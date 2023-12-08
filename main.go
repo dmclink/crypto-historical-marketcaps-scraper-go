@@ -33,8 +33,16 @@ type Row struct {
 	WeekChange sql.NullFloat64
 }
 
+// Time delay between scrolls. May cause issues fully loading table data if it is too low
 const scrollDelay = 500 * time.Millisecond
+
+// Multiple of viewport height for scrolling. May cause issues fully loading table data if it is too high
+const viewportScrollMult = 1.5
+
+// Time delay between pressing the "Load More" button. May make program skip data if it is too low
 const loadMoreDelay = 2 * time.Second
+
+// Name of table in your database. Will be created if it doesn't exist
 const tableName = "marketcap_snapshots"
 
 func main() {
@@ -218,9 +226,10 @@ func main() {
 		if err != nil {
 			fmt.Println("Failed to get body height | ", err)
 		}
-		// Scroll down slowly, one viewport at a time
-		for i := 0; i < int(bodyHeight.(float64)); i += int(viewportHeight.(float64)) {
-			script := fmt.Sprintf("window.scrollBy(0, %d);", int(viewportHeight.(float64)))
+		// Scroll down slowly, one viewport * viewportScrollMult at a time
+		scrollLength := int(viewportHeight.(float64) * viewportScrollMult)
+		for i := 0; i < int(bodyHeight.(float64)); i += scrollLength {
+			script := fmt.Sprintf("window.scrollBy(0, %d);", scrollLength)
 
 			_, err = wd.ExecuteScript(script, nil)
 			if err != nil {
@@ -300,6 +309,7 @@ func main() {
 			var weekChange float64
 			var weekNotNull bool
 
+			var b strings.Builder
 			if rankTxt, err := cells[colIndexes["Rank"]].Text(); err != nil {
 				log.Fatal("Error converting cell to text | ", err)
 			} else {
@@ -325,8 +335,15 @@ func main() {
 					mcapNotNull = false
 				} else {
 					mcapNotNull = true
-					marketCapTxt = strings.Replace(marketCapTxt, "$", "", -1)
-					marketCapTxt = strings.Replace(marketCapTxt, ",", "", -1)
+					for _, ch := range marketCapTxt {
+						switch ch {
+						case '$', ',':
+							continue
+						default:
+							b.WriteRune(ch)
+						}
+					}
+					marketCapTxt = b.String()
 					if marketCap, err = strconv.ParseFloat(marketCapTxt, 64); err != nil {
 						log.Fatal("ParseFloat error, marketCap | ", err)
 					}
@@ -335,8 +352,16 @@ func main() {
 			if priceTxt, err := cells[colIndexes["Price"]].Text(); err != nil {
 				log.Fatal("Error converting price cell to text | ", err)
 			} else {
-				priceTxt = strings.Replace(priceTxt, "$", "", -1)
-				priceTxt = strings.Replace(priceTxt, ",", "", -1)
+				b.Reset()
+				for _, ch := range priceTxt {
+					switch ch {
+					case '$', ',':
+						continue
+					default:
+						b.WriteRune(ch)
+					}
+				}
+				priceTxt = b.String()
 				if priceTxt == "" || priceTxt == "--" {
 					price = 0.0
 					priceNotNull = false
@@ -357,7 +382,16 @@ func main() {
 					supply = 0
 				} else {
 					supplyNotNull = true
-					supplyTxt = strings.Replace(supplyTxt, ",", "", -1)
+					b.Reset()
+					for _, ch := range supplyTxt {
+						switch ch {
+						case ',', ' ':
+							continue
+						default:
+							b.WriteRune(ch)
+						}
+					}
+					supplyTxt = b.String()
 					if supply, err = strconv.ParseInt(supplyTxt, 10, 64); err != nil {
 						log.Fatal("ParseInt error, supply | ", err)
 					}
@@ -367,8 +401,16 @@ func main() {
 				if volumeTxt, err := cells[volIndex].Text(); err != nil {
 					log.Fatal("Error converting volume cell to text | ", err)
 				} else {
-					volumeTxt = strings.Replace(volumeTxt, "$", "", -1)
-					volumeTxt = strings.Replace(volumeTxt, ",", "", -1)
+					b.Reset()
+					for _, ch := range volumeTxt {
+						switch ch {
+						case '$', ',':
+							continue
+						default:
+							b.WriteRune(ch)
+						}
+					}
+					volumeTxt = b.String()
 					if volumeTxt == "--" || volumeTxt == "" {
 						volumeNotNull = false
 						volume = 0
@@ -426,7 +468,7 @@ func main() {
 			// #endregion
 			queuedRows = append(queuedRows, newRow)
 		}
-
+		log.Println("Batch inserting rows")
 		batchInsertRows(queuedRows, ctx, dbpool)
 
 		// add 7 days to next entry
@@ -497,11 +539,16 @@ func percTxtToFloat64(text string, err error) (float64, bool) {
 	if text == "--" || text == "" {
 		return 0.0, false
 	} else {
-		text = strings.Replace(text, "%", "", -1)
-		text = strings.Replace(text, ",", "", -1)
-		text = strings.Replace(text, "<", "", -1)
-		text = strings.Replace(text, ">", "", -1)
-		text = strings.Replace(text, " ", "", -1)
+		var b strings.Builder
+		for _, ch := range text {
+			switch ch {
+			case '%', ',', '<', '>', ' ':
+				continue
+			default:
+				b.WriteRune(ch)
+			}
+		}
+		text = b.String()
 		if percentChange, err := strconv.ParseFloat(text, 64); err != nil {
 			log.Fatal("prcTxtToFloat64 ParseFloat error | ", err)
 			return 0.0, false
