@@ -316,7 +316,6 @@ func main() {
 			var dayNotNull bool
 			var weekChange float64
 			var weekNotNull bool
-
 			var b strings.Builder
 			if rankTxt, err := cells[colIndexes["Rank"]].Text(); err != nil {
 				log.Fatal("Error converting cell to text | ", err)
