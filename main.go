@@ -143,6 +143,7 @@ func main() {
 
 	// Begin program loop to iterate over every snapshot
 	for date.Before(time.Now()) {
+		restart := false
 		log.Println("Beginning parse for snapshot | ", date)
 		url := fmt.Sprintf("https://coinmarketcap.com/historical/%d%02d%02d/", date.Year(), date.Month(), date.Day())
 		log.Println(url)
@@ -254,6 +255,7 @@ func main() {
 			wd.DeleteAllCookies()
 			log.Println("Error finding theads, restarting loop in 5 minutes")
 			time.Sleep(300 * time.Second)
+			restart = true
 			continue
 		}
 		thead := theads[2]
@@ -265,6 +267,8 @@ func main() {
 			columnText, err := column.Text()
 			if err != nil {
 				log.Println("Error converting column to text | ", err)
+				restart = true
+				continue
 			}
 			colIndexes[columnText] = i
 		}
@@ -282,11 +286,15 @@ func main() {
 		rows, err := tbody.FindElements(selenium.ByCSSSelector, "tr")
 		if err != nil {
 			log.Println("Error finding row elements | ", err)
+			restart = true
+			continue
 		}
 		for _, row := range rows {
 			cells, err := row.FindElements(selenium.ByCSSSelector, "td")
 			if err != nil {
 				log.Println("Error finding cell elements | ", err)
+				restart = true
+				continue
 			}
 			// #endregion
 
@@ -308,13 +316,13 @@ func main() {
 			var dayNotNull bool
 			var weekChange float64
 			var weekNotNull bool
-
 			var b strings.Builder
 			if rankTxt, err := cells[colIndexes["Rank"]].Text(); err != nil {
 				log.Fatal("Error converting cell to text | ", err)
 			} else {
 				if rankTxt == "" {
 					log.Printf("Error loading \"Rank\" column for row %v, restarting loop for this snapshot date %v", row, date)
+					restart = true
 					continue
 				}
 				if rank, err = strconv.ParseInt(rankTxt, 10, 64); err != nil {
@@ -467,6 +475,9 @@ func main() {
 
 			// #endregion
 			queuedRows = append(queuedRows, newRow)
+		}
+		if restart {
+			continue
 		}
 		log.Println("Batch inserting rows")
 		batchInsertRows(queuedRows, ctx, dbpool)
