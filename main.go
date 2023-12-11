@@ -402,7 +402,13 @@ func main() {
 					}
 					supplyTxt = b.String()
 					if supply, err = strconv.ParseInt(supplyTxt, 10, 64); err != nil {
-						log.Fatal("ParseInt error, supply | ", err)
+						if strings.Contains(err.Error(), "value out of range") {
+							log.Println("supply too large for int64, entering null")
+							supply = 0
+							supplyNotNull = false
+						} else {
+							log.Fatal("ParseInt error, supply | ", err)
+						}
 					}
 				}
 			}
