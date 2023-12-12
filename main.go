@@ -89,7 +89,7 @@ func main() {
 					unix_time BIGINT,
 					rank INTEGER,
 					name VARCHAR(255),
-					symbol VARCHAR(15),
+					symbol VARCHAR(30),
 					market_cap DECIMAL,
 					price DECIMAL,
 					circulating_supply BIGINT,
