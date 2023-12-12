@@ -45,6 +45,9 @@ const loadMoreDelay = 2 * time.Second
 // Name of table in your database. Will be created if it doesn't exist
 const tableName = "marketcap_snapshots"
 
+// Skips coins with no marketcap listed on CoinMarketCap (CMC)
+const skipNoMcap = true
+
 func main() {
 	// #region Load db.env environment variables
 	err := godotenv.Load("db.env")
@@ -243,8 +246,7 @@ func main() {
 		log.Println("End of page reached")
 		// #endregion
 
-		// #region Iterate theads and rows
-		// Iterate over thead to find column indexes
+		// #region Iterate theads and find column indexes
 		colIndexes := make(map[string]int)
 		theads, err := wd.FindElements(selenium.ByCSSSelector, "thead")
 		if err != nil {
@@ -289,6 +291,8 @@ func main() {
 			restart = true
 			continue
 		}
+		// #endregion
+
 		for _, row := range rows {
 			cells, err := row.FindElements(selenium.ByCSSSelector, "td")
 			if err != nil {
@@ -296,7 +300,6 @@ func main() {
 				restart = true
 				continue
 			}
-			// #endregion
 
 			// #region Clean page text and convert to data types for Row struct
 			var rank int64
@@ -317,6 +320,32 @@ func main() {
 			var weekChange float64
 			var weekNotNull bool
 			var b strings.Builder
+			if marketCapTxt, err := cells[colIndexes["Market Cap"]].Text(); err != nil {
+				log.Fatal("Error converting marketCap cell to text | ", err)
+			} else {
+				if marketCapTxt == "--" || marketCapTxt == "" {
+					if skipNoMcap {
+						continue
+					} else {
+						marketCap = 0.0
+						mcapNotNull = false
+					}
+				} else {
+					mcapNotNull = true
+					for _, ch := range marketCapTxt {
+						switch ch {
+						case '$', ',':
+							continue
+						default:
+							b.WriteRune(ch)
+						}
+					}
+					marketCapTxt = b.String()
+					if marketCap, err = strconv.ParseFloat(marketCapTxt, 64); err != nil {
+						log.Fatal("ParseFloat error, marketCap | ", err)
+					}
+				}
+			}
 			if rankTxt, err := cells[colIndexes["Rank"]].Text(); err != nil {
 				log.Fatal("Error converting cell to text | ", err)
 			} else {
@@ -334,28 +363,6 @@ func main() {
 			}
 			if symbol, err = cells[colIndexes["Symbol"]].Text(); err != nil {
 				log.Fatal("Error converting symbol cell to text | ", err)
-			}
-			if marketCapTxt, err := cells[colIndexes["Market Cap"]].Text(); err != nil {
-				log.Fatal("Error converting marketCap cell to text | ", err)
-			} else {
-				if marketCapTxt == "--" || marketCapTxt == "" {
-					marketCap = 0.0
-					mcapNotNull = false
-				} else {
-					mcapNotNull = true
-					for _, ch := range marketCapTxt {
-						switch ch {
-						case '$', ',':
-							continue
-						default:
-							b.WriteRune(ch)
-						}
-					}
-					marketCapTxt = b.String()
-					if marketCap, err = strconv.ParseFloat(marketCapTxt, 64); err != nil {
-						log.Fatal("ParseFloat error, marketCap | ", err)
-					}
-				}
 			}
 			if priceTxt, err := cells[colIndexes["Price"]].Text(); err != nil {
 				log.Fatal("Error converting price cell to text | ", err)
@@ -488,7 +495,7 @@ func main() {
 		}
 		log.Println("Batch inserting rows")
 		batchInsertRows(queuedRows, ctx, dbpool)
-
+		log.Printf("Successfully batch inserted %d rows", len(queuedRows))
 		// add 7 days to next entry
 		date = date.AddDate(0, 0, 7)
 	}
