@@ -101,7 +101,7 @@ func main() {
 					percent_change_24h DECIMAL(7, 2),
 					percent_change_7d DECIMAL(7, 2),
 				
-					PRIMARY KEY (snapshot_date, rank)
+					PRIMARY KEY (snapshot_date, rank, symbol)
 				);
 			`)
 			if err != nil {
