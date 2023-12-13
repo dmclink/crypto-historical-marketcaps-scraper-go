@@ -34,10 +34,10 @@ type Row struct {
 }
 
 // Time delay between scrolls. May cause issues fully loading table data if it is too low
-const scrollDelay = 500 * time.Millisecond
+const scrollDelay = 600 * time.Millisecond
 
 // Multiple of viewport height for scrolling. May cause issues fully loading table data if it is too high
-const viewportScrollMult = 1.5
+const viewportScrollMult = 1.4
 
 // Time delay between pressing the "Load More" button. May make program skip data if it is too low
 const loadMoreDelay = 2 * time.Second

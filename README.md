@@ -18,6 +18,6 @@ ChromeDriver
     - (Alternative 1) Change variable chromeDriverPath to absolute path of chromedriver.exe
     - (Alternative 2) Enter absolute path of chromedriver.exe at the error prompt after running program
 6. Run
-    - (optional) Adjust constants as necessary. If program quits on "Error finding \"Rank" column" it is likely that scrollDelay is too low or viewportScrollMult is too high
+    - (optional) Adjust constants as necessary. If program panics with "runtime error: index out of range" it is likely that scrollDelay is too low or viewportScrollMult is too high
     - (optional) Rename constant tableName if desired. Program will check for/create a table with this name
     - (optional) Adjust const skipNoMcap if desired. CMC begins ranking coins ordered by descending price where no supply or market cap is known. Leaving this const true will skip these coins, speeding up row processing and saving storage in database especially for later snapshot dates. Set to false to include them
