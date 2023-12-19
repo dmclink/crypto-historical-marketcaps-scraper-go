@@ -145,8 +145,8 @@ func main() {
 	// #endregion
 
 	// Begin program loop to iterate over every snapshot
+snapshotsLoop:
 	for date.Before(time.Now()) {
-		restart := false
 		log.Println("Beginning parse for snapshot | ", date)
 		url := fmt.Sprintf("https://coinmarketcap.com/historical/%d%02d%02d/", date.Year(), date.Month(), date.Day())
 		log.Println(url)
@@ -257,8 +257,7 @@ func main() {
 			wd.DeleteAllCookies()
 			log.Println("Error finding theads, restarting loop in 5 minutes")
 			time.Sleep(300 * time.Second)
-			restart = true
-			continue
+			continue snapshotsLoop
 		}
 		thead := theads[2]
 		columns, err := thead.FindElements(selenium.ByCSSSelector, "th")
@@ -268,9 +267,8 @@ func main() {
 		for i, column := range columns {
 			columnText, err := column.Text()
 			if err != nil {
-				log.Println("Error converting column to text | ", err)
-				restart = true
-				continue
+				log.Println("Error converting column to text, restarting loop | ", err)
+				continue snapshotsLoop
 			}
 			colIndexes[columnText] = i
 		}
@@ -287,18 +285,16 @@ func main() {
 		}
 		rows, err := tbody.FindElements(selenium.ByCSSSelector, "tr")
 		if err != nil {
-			log.Println("Error finding row elements | ", err)
-			restart = true
-			continue
+			log.Println("Error finding row elements, restarting loop | ", err)
+			continue snapshotsLoop
 		}
 		// #endregion
 
 		for _, row := range rows {
 			cells, err := row.FindElements(selenium.ByCSSSelector, "td")
 			if err != nil {
-				log.Println("Error finding cell elements | ", err)
-				restart = true
-				continue
+				log.Println("Error finding cell elements, restarting loop | ", err)
+				continue snapshotsLoop
 			}
 
 			// #region Clean page text and convert to data types for Row struct
@@ -351,8 +347,7 @@ func main() {
 			} else {
 				if rankTxt == "" {
 					log.Printf("Error loading \"Rank\" column for row %v, restarting loop for this snapshot date %v", row, date)
-					restart = true
-					continue
+					continue snapshotsLoop
 				}
 				if rank, err = strconv.ParseInt(rankTxt, 10, 64); err != nil {
 					log.Fatal("Error converting string to int | ", err)
@@ -489,10 +484,7 @@ func main() {
 			// #endregion
 			queuedRows = append(queuedRows, newRow)
 		}
-		if restart {
-			log.Println("Program encountered error, restarting loop for this snapshot")
-			continue
-		}
+
 		log.Println("Batch inserting rows")
 		batchInsertRows(queuedRows, ctx, dbpool)
 		log.Printf("Successfully batch inserted %d rows", len(queuedRows))
