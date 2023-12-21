@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -35,22 +36,29 @@ type Row struct {
 
 // #region Configs
 // Time delay between scrolls. May cause issues fully loading table data if it is too low
-var scrollDelay = 600 * time.Millisecond
+var scrollDelay time.Duration = 600 * time.Millisecond
 
 // Multiple of viewport height for scrolling. May cause issues fully loading table data if it is too high
-const viewportScrollMult = 1.4
+const viewportScrollMult float64 = 1.4
 
 // Time delay between pressing the "Load More" button. May make program skip data if it is too low
-const loadMoreDelay = 2 * time.Second
+const loadMoreDelay time.Duration = 2 * time.Second
 
 // Name of table in your database. Will be created if it doesn't exist
-const tableName = "marketcap_snapshots"
+const tableName string = "marketcap_snapshots"
 
 // Skips coins with no marketcap listed on CoinMarketCap (CMC)
-const skipNoMcap = true
+const skipNoMcap bool = true
 
 // Time after which program will timeout and main loop will restart
-const timeout = 60 * time.Minute
+const timeout time.Duration = 60 * time.Minute
+
+// Number of rows per snapshot page that the program will process and enter to database.
+//
+// Zero or negative for no max
+const maxRows = 3000
+
+const exportCSV bool = true
 
 // #endregion
 
@@ -66,8 +74,7 @@ func main() {
 		fmt.Println("Error getting filepath")
 		return
 	}
-	dirPath := filepath.Dir(filename)
-	// #endregion
+	dirPath := filepath.Dir(filename) // #endregion
 
 	// #region Connect to database
 	ctx := context.Background()
@@ -79,8 +86,7 @@ func main() {
 	} else {
 		log.Println("DB connected successfully")
 	}
-	defer dbpool.Close()
-	// #endregion
+	defer dbpool.Close() // #endregion
 
 	// #region Try to select the latest date on table. If table doesn't ...
 	// exist, create table and initialize starting date to April 28th, 2013
@@ -119,10 +125,9 @@ func main() {
 	} else {
 		log.Println("Most recent date is", date)
 		date = date.AddDate(0, 0, 7)
-	}
-	// #endregion
+	} // #endregion
 
-	// Begin program loop to iterate over every snapshot while watching for timeout
+	// Begin main program loop to iterate over every snapshot while watching for timeout
 	timer := time.NewTicker(timeout)
 main:
 	for {
@@ -159,8 +164,7 @@ main:
 					log.Fatal("Failed to open session:", err)
 				}
 				defer wd.Quit()
-				log.Println("ChromeDriver server started successfully")
-				// #endregion
+				log.Println("ChromeDriver server started successfully") // #endregion
 
 				// #region Navigate to page and fully load by clicking buttons
 				// Navigate to the webpage
@@ -189,7 +193,8 @@ main:
 				// Find the "Reject All" button and click it
 				clickRejectAll(wd)
 				countLoadMoreClicked := 0
-				for {
+				maxClicks := int(math.Ceil(maxRows/200) - 1) // divide maxRows by 200 as Load More button populates 200 entries per click
+				for maxRows <= 0 || countLoadMoreClicked < maxClicks {
 					// Find the "Load More" button and click it
 					button, err := wd.FindElement(selenium.ByCSSSelector, "div.cmc-table-listing__loadmore > button[type='button']")
 					if err != nil {
@@ -204,6 +209,7 @@ main:
 						if err != nil {
 							if strings.Contains(err.Error(), "click intercepted") {
 								clickRejectAll(wd)
+								continue
 							} else {
 								log.Fatal("Error clicking \"Load More\" button | ", err)
 							}
@@ -223,8 +229,7 @@ main:
 						}
 						time.Sleep(loadMoreDelay)
 					}
-				}
-				// #endregion
+				} // #endregion
 
 				scrollPage(scrollDelay, wd)
 
@@ -270,15 +275,16 @@ main:
 				if err != nil {
 					log.Println("Error finding row elements, restarting loop | ", err)
 					continue snapshotsLoop
-				}
-				// #endregion
+				} // #endregion
 
+				countRowsInserted := 0
 			rowsLoop:
 				for _, row := range rows {
-					// #region Find cell elements, clean page text and convert to data types for Row struct
+					// #region Find and convert cells to data types for Row struct and append to slice
 					cells, err := row.FindElements(selenium.ByCSSSelector, "td")
 					if err != nil {
 						log.Println("Error finding cell elements, restarting loop | ", err)
+						wd.Quit()
 						continue snapshotsLoop
 					}
 
@@ -338,6 +344,7 @@ main:
 					} else {
 						if rankTxt == "" {
 							log.Printf("Error loading \"Rank\" column for row %v, restarting loop for this snapshot date %v", row, date)
+							wd.Quit()
 							continue snapshotsLoop
 						}
 						if rank, err = strconv.ParseInt(rankTxt, 10, 64); err != nil {
@@ -471,49 +478,49 @@ main:
 							Valid:   weekNotNull,
 						},
 					}
-					// #endregion
 					queuedRows = append(queuedRows, newRow)
+					countRowsInserted += 1
+					if countRowsInserted >= maxRows {
+						break
+					} // #endregion
 				}
 
 				// #region Batch insert rows to database and prepare for next iteration
+				// #region DELETE exit program if there are 3000 or more valid rows
+				if len(queuedRows) >= 3000 {
+					log.Fatalf("There are 3000 or more rows at snapshot date %s. Change const maxRows", date.Format("2006-01-02"))
+				} // #endregion
 				log.Println("Batch inserting rows")
 				batchInsertRows(queuedRows, ctx, dbpool)
 				log.Printf("Successfully batch inserted %d rows", len(queuedRows))
 				// add 7 days to next entry
 				date = date.AddDate(0, 0, 7)
 				timer.Reset(timeout)
-				wd.Quit()
-				// #endregion
+				wd.Quit() // #endregion
 
-				// Entries are caught up, exit main loop to export csv and finish program
+				// #region Exit main loop when entries are caught up to current date
 				if date.After(time.Now()) {
 					break main
-				}
+				} // #endregion
 			}
 		}
 	}
 
 	// #region Export to CSV after program finished
-	log.Println("Program complete")
-	log.Println("Would you like to export database to csv? (PSQL Role must be Superuser or a member of the pg_write_server_files role)")
-	log.Println("Enter y or yes. Enter anything else to quit")
-	var userResp string
-	_, err = fmt.Scan(&userResp)
-	if err != nil {
-		log.Fatal("Error scanning input | ", err)
-	}
-	userResp = strings.ToLower(userResp)
-	if userResp == "y" || userResp == "yes" {
+	log.Println("Scraping complete")
+	if exportCSV {
 		copyQueryString := `COPY marketcap_snapshots TO '` + dirPath + `\` + tableName + `_` + time.Now().Format("2006-01-02") + `' DELIMITER ',' CSV HEADER;`
 		_, err = dbpool.Exec(ctx, copyQueryString)
 		if err != nil {
 			log.Fatal("Error exporting to .csv | ", err)
 		}
+		log.Println("Exported database to .csv")
 		// #endregion
 	}
 }
 
-// From the top, scroll down one frame at a time until it reaches the bottom
+// From the top, scroll down one frame at a time until it reaches the bottom.
+// This loads the dynamically populated data on the page
 func scrollPage(scrollDelay time.Duration, wd selenium.WebDriver) {
 	var err error
 	_, err = wd.ExecuteScript("window.scrollTo(0, 0);", nil)
